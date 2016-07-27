@@ -1,0 +1,285 @@
+---
+title: "理解javascript promise"
+layout: post
+tags:
+    - promise
+    - javascript
+---
+
+### so promise ？
+
+promise，翻译过来就是承诺的意思，在javascript中，promise是一个关于异步操作的结果的“承诺”,
+可以在[promise A+ spec][2]中了解更多关于promise的信息。
+
+在此翻译了pouchdb中关于promise的博客，以加深对promise的理解。[作者][3]在推上发了一段关于promise的代码，如下:
+
+~~~javascript
+//case 1
+doSomething().then(function() {
+    return doSomethingElse()
+})
+//case 2
+doSomething().then(function() {
+    doSomethingElse()
+})
+//case 3
+doSomething().then(doSomethingElse())
+//case 4
+doSomething().then(doSomethingElse)
+~~~
+
+注意: `doSomething`及`doSomethingElse`都是一个函数并返回新的promise.
+
+知道几个case的区别么? #@!...以下代码可能会使用一些ES6语法。
+
+### 坑1: 回调金字塔
+
+~~~javascript
+getUsersFromRESTAPI().then((resultOfUsers) => {
+    resultOfUsers.forEach((user) => {
+        localStorageWithPromise.put(user).then(() => {
+            console.log(`put user ${user.name} to localStorage success!`)
+        }).catch((err) => {
+            console.log(`put user ${user.name} to localStorage failed!`)
+            localStorageWithPromise.remove(user.id).then(() => {
+                console.log(`remove possible user info with user id : ${user.id}`)
+            })
+            ...
+        })
+    })
+})
+~~~
+
+这样当我们需要完成更复杂的一些回调操作时，可能代码比这还嵌套得深，这样代码的可读性以及可维护性就会很糟糕，而更好的书写
+方式应该这样，称为`组合promise`
+
+~~~javascript
+getUsersFromRESTAPI().then(resultOfUsers => {
+    return Promise.all(resultOfUsers.forEach((user) => {
+        return localStorageWithPromise.put(user)
+    }))
+}).then((resultInfo) => {
+    console.log(`put result ${resultInfo}`)
+}).catch((err) => {
+    console.log(err)
+})
+~~~
+
+更直观一点，或许我们应该组织我们的promise调用链如下面这样的方式：
+
+~~~javascript
+operationA().then((resultOfA) => {
+    return doWithResultA(resultOfA)
+}).then((resultFromA) => {
+    return operationB(resultFromA)
+}).then((resultFromB) => {
+    return operationC(resultFromB)
+}).catch(err => {
+    console.log(`any errors "${err}" happened in promise chain`)
+})
+~~~
+
+这样整个调用链会比较清晰，且可以统一的`catch`错误并处理。
+
+### 坑2: forEach与promise
+
+比如如下的操作:
+
+~~~javascript
+getUsersFromRESTAPI().then(resultOfUsers => {
+    resultOfUsers.forEach(user => {
+        user.remove()
+    })
+}).then(() => {
+    //以为已经删除了所有用户
+})
+~~~
+
+很多时候我们以为这样写就可以了，其实是错误的，第二个then回调并不会等待所有user被删除才执行，因为在第一个then回调中，函数返回
+的是`undefined`, 所以这样的写法就会存在bug, 正确的写法应该如下:
+
+~~~javascript
+getUsersFromRESTAPI().then(resultOfUsers => {
+    return Promise.all(resultOfUsers.forEach(user => {
+        return user.remove()
+    }))
+}).then(() => {
+    console.log("all users has been deleted.")
+})
+~~~
+
+在第一个then回调中返回了promise，并使用了`promise.all`, 注意`user.remove`也是返回promise的。
+
+### 坑3: 忘记catch错误
+
+我们不应该去假设我们的promise不返回任何错误，应该在promise调用中都进行正确的错误处理.
+
+~~~javascript
+promise1().then(() => {
+    return opReturnPromise2()
+}).then(() => {
+    return opReturnPromise3()
+}).catch(err => {
+    //handle errors properly.
+})
+~~~
+
+### promise中的返回值
+
+~~~javascript
+promise1().then(() => {
+    opReturnPromise2()
+}).then(() => {
+    opReturnPromise3()
+}).catch(err => {
+    //handle errors properly.
+})
+~~~
+
+有什么问题么？这儿在promise的回调中`返回值存在问题`, 在promise中，then()回调可以返回:
+
+1. 返回另一个promise.
+2. 返回一个值(或者undefined).
+3. 返回一个错误.
+
+#### 返回另一个promise
+
+这就是上面提到的`组合promise`.
+
+~~~javascript
+promise1().then(() => {
+    return opReturnPromise2()
+}).then(() => {
+    return opReturnPromise3()
+}).catch(err => {
+    //handle errors properly.
+})
+~~~
+
+#### 返回一个值(或者undefined)
+
+~~~javascript
+getUserFromRESTAPI(userName).then((userInfo) => {
+    if (FriendsCache[userInfo.id]) {
+        return FriendsCache[userInfo.id]
+    }
+    return getUserFriends(userInfo.id)
+}).then((friends) => {
+    console.log(friends)
+}).catch(err => {
+    console.log(err)
+})
+~~~
+
+这样写是不是很清晰，在第二个处理friends的then回调中，我不需要关心friends是在cache中还是从API中获取的，处理得到的好友列表即可。
+由于在javascript中，函数不显视的返回任何值，则返回undefined，所有在promise的then回调中，建议总是返回一个值或者抛出错误。
+
+#### 返回一个错误
+
+~~~javascript
+getUserFromRESTAPI(userName).then((userInfo) => {
+    if (isLoggedout(userInfo.id)) {
+        throw new Error("logged out!")
+    }
+    if (FriendsCache[userInfo.id]) {
+        return FriendsCache[userInfo.id]
+    }
+    return getUserFriends(userInfo.id)
+}).then((friends) => {
+    console.log(friends)
+}).catch(err => {
+    console.log(err)
+})
+~~~
+
+### 巧用Promose.resolve
+
+使用promise包装同步的代码使其异步化，并进行错误处理。对于同步的操作，promise也可以提供很多帮助，比如:
+
+~~~javascript
+let caculateSomethingAndMayThrowError  = (x, y) => {
+    if (x < y) {
+        throw new Error("x < y")
+    }
+    return x - y
+}
+
+let wrapAPI2Promise = () => {
+    return Promise.resolve().then(() => {
+        let value = caculateSomethingAndMayThrowError()
+        return value
+    }).then((value) => {
+        console.log(value)
+    }).catch((err) => {
+        console.log(err)
+    })
+}
+~~~
+
+在catch中我们可以处理同步函数抛出的异常.
+
+### 避免reject函数，使用catch
+
+catch函数其实是一个语法糖, 如下所示:
+
+~~~javascript
+promise1().catch((err) => {})
+//equal to
+promise1().then(null, (err) => {})
+~~~
+
+但是如下的代码却并不一样，如下:
+
+~~~javascript
+promise1().then(() => {
+    return promise2()
+}).catch((err) => {
+    console.log(err)
+})
+
+promise1().then(() => {
+    return promise2()
+}, (err) => {
+    console.log(err)
+})
+~~~
+第一个catch会处理整个promise链中的异常错误，但是第二个却是处理promise1的异常错误，因为它相当于promise1的reject函数。
+所以一般情况下建议只用catch函数，避免给then传递第二个参数导致理解错误，出现bug。
+
+### promise工厂函数
+
+有时可以通过工厂函数，组合我们的promise链，但是一定要注意返回值, 例如:
+
+~~~javascript
+//依次sleep 1s
+
+let suspendOneSecondFactory = () => {
+    return () => {
+        return new Promise((resolve, reject) => {
+            setTimeout(() => {
+                console.log('sleep 1s')
+                resolve()
+            }, 1000)
+        })
+    }
+}
+
+let result = Promise.resolve()
+[1, 2, 3].forEach(() => {
+    result = result.then(suspendOneSecondFactory())
+})
+result.then(() => {
+    console.log("the end")
+}).catch(err => {
+    console.log(err)
+})
+~~~
+
+### 总结
+
+promise在使用时一定要注意then回调的返回值，以及组合使用promise，并将操作尽量步骤化，那样可以使用proise链组合出各种需要的
+依赖链并进行调用, 如果给then调用传递非函数值，在then调用中传递的非函数值会被解析为null。
+
+[1]: http://pouchdb.com/2015/05/18/we-have-a-problem-with-promises.html
+[2]: https://promisesaplus.com/
+[3]: https://twitter.com/nolanlawson

@@ -1,0 +1,158 @@
+---
+title: 'golang grpc学习'
+layout: post
+tags:
+    - golang
+    - grpc
+---
+
+使用gRPC构建文件传输服务
+
+### grpc简介
+
+[grpc](http://www.grpc.io/)是Google开源的rpc框架，使用[protobuf](https://developers.google.com/protocol-buffers/)进行数据编码，，基于Http2协议，提供了很多优势，比如:双向的数据流，流控制，包头压缩，多路复用等，详细信息可以参考grpc官网。
+
+### protobuf3
+
+protobuf是Google提供的一个跨语言的数据编码机制，支持多种语言，在结合RPC使用时，可以节省带宽，提高传输效率，grpc提供了protobuf的相应工具，这样就可以使用proto文件定义RPC接口，约定传输数据格式，通过生成工具生成相应语言的源文件。
+
+### 定义一个文件传输服务
+
+以下为一个文件服务的proto文件定义, file.proto :
+
+```protocol
+syntax ＝ "proto3";
+
+package filetransfer;
+
+//rpc调用定义
+service FileServer {
+  rpc GetFile(FileDescriptor) returns (stream FileContent) {}
+}
+
+message FileDescriptor {
+  string filename = 1;
+}
+
+message FileContent {
+  bytes content = 1;
+  string md5sum = 2;
+}
+```
+
+通过工具生成相应语言源代码，以[golang](http://golang.org)为例，使用如下命令:
+
+```bash
+protoc --go_out=plugins=grpc:. file.proto
+```
+
+以下是服务端的代码实现:
+
+```go
+const (
+  BUFSIZE = 1024
+)
+
+func (am *AgentManager) GetFile(fd *pb.FileDescriptor, stream pb.FileServer_GetFileServer) error {
+  filename := fd.Filename
+
+  //make sure file existed.
+  fo, err := os.Open(filename)
+  if err != nil {
+    return ErrNoSuchFile
+  }
+  defer func() {
+      if err := fo.Close(); err != nil {
+        panic(err)
+      }
+  }()
+
+  content := &pb.FileContent {
+    Content: make([]byte, BUFSIZE),
+    Md5Sum: caculateMd5(filename),
+  }
+  for {
+    n, err := fo.Read(content.Content)
+    if err != nil && err != io.EOF {
+      return ErrReadFile
+    }
+    if n == 0 {
+      break
+    }
+
+    if err := stream.Send(content); err != nil {
+      return err
+    }
+  }
+
+  //indicate the end of stream.
+  return nil
+}
+```
+
+以下是Client端代码:
+
+```go
+
+func ReadFile(filename string, conn pb.FileServerClient) error {
+  stream, err := conn.GetFile(filename)
+  if err != nil {
+    panic(err)
+  }
+
+  outFd, err := os.Create(filename)
+  if err != nil {
+    panic(err)
+  }
+  defer func() {
+      if err := outFd.Close(); err != nil {
+        panic(err)
+      }
+  }()
+
+  for {
+    content, err := stream.Recv()
+    if err == io.EOF {
+      break
+    }
+    if err != nil {
+      panic(err)
+    }
+
+    if err := outFd.Write(content.Content); err != nil {
+      panic(err)
+    }
+  }
+
+  return nil
+}
+
+
+func checkMd5(filename string, md5 string) bool {
+  return caculateMd5(filename) == md5
+}
+```
+
+代码有部分省略.
+
+### grpc stream
+
+```protobuf
+syntax = "proto3";
+
+package chatservice;
+
+service chatservice {
+  //双向的stream
+  rpc chat(stream ChatMessage) returns (ChatMessage) {}
+}
+```
+
+grpc的stream可以是双向的也可以是单向的，在通过proto文件定义时指定，比如: 也可以实现如Chat这样的接口。
+
+### 参考链接
+
+- [go-grpc-slides](http://talks.golang.org/2015/gotham-grpc.slide#1)
+- [Rest & gRPC](https://coreos.com/blog/gRPC-protobufs-swagger.html)
+- [etcdv3 API proto](https://github.com/coreos/etcd/blob/master/etcdserver/etcdserverpb/rpc.proto)
+- [gRPC rest gateway](https://github.com/gengo/grpc-gateway)
